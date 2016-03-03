@@ -5,7 +5,6 @@
 
 #define DEBUG
 
-int token; // 当前token
 char * src, * old_src; // 指向代码String的指针
 int poolsize;
 int line;
@@ -15,7 +14,32 @@ int * text, // 代码段
     * stack; // 栈
 char * data; // 数据段
 
-// 寄存器相关变量
+//***************************
+//     词法分析相关变量
+//***************************
+int token; // 当前token
+// Token
+enum {
+    Num = 128, Fun, Sys, Glo, Loc, Id, // 128 ~ 133
+    Char, Else, Enum, If, Int, Return, Sizeof, While, // 134 ~ 141
+    Assign, Cond, Lor, Lan, Or, Xor, And, Eq, Ne, Lt, Gt, Le, Ge, Shl, Shr, Add, Sub, Mul, Div, Mod, Inc, Dec, Brak
+};
+
+
+int token_val; // 数字，字符串的值
+int * current_id, // 当前标示
+    * symbols; // 保存全部标示结构（变量、关键字）
+
+enum {Token, Hash, Name, Type, Class, Value, BType, BClass, BValue, IdSize};  // 标志的字段
+
+enum { CHAR, INT, PTR }; // 支持的类型
+int *idmain; // main入口
+// END
+
+
+//***************************
+//      寄存器相关变量
+//***************************
 int * pc, // 程序计数器，该地址存放下一条要执行的计算机指令
     * bp, // 指针寄存器，指向栈顶
     * sp, // 基址指针
@@ -36,23 +60,7 @@ enum {
     OR, XOR, AND, EQ, NE, LT, GT, LE, GE, SHL, SHR, ADD, SUB, MUL, DIV, MOD, // 14 ~ 29
     OPEN, READ, CLOS, PRTF, MALC, MSET, MCMP, EXIT // 30 ~
 };
-
-// Token
-enum {
-    Num = 128, Fun, Sys, Glo, Loc, Id, // 128 ~ 133
-    Char, Else, Enum, If, Int, Return, Sizeof, While, // 134 ~ 141
-    Assign, Cond, Lor, Lan, Or, Xor, And, Eq, Ne, Lt, Gt, Le, Ge, Shl, Shr, Add, Sub, Mul, Div, Mod, Inc, Dec, Brak
-};
-
-int token_val; // 数字，字符串的值
-int * current_id, // 当前标示
-    * symbols; // 保存全部标示结构（变量、关键字）
-
-enum {Token, Hash, Name, Type, Class, Value, BType, BClass, BValue, IdSize};  // 标志的字段
-
-enum { CHAR, INT, PTR }; // 支持的类型
-int *idmain; // main入口
-
+// END
 
 
 void debug()
@@ -74,15 +82,21 @@ void debug()
     int i = 0;
     char * title[] = {"Token", "Hash", "Name", "Type", "Class", "Value", "BType", "BClass", "BValue"};
     for (i = 0; i < IdSize; i++) {
-        printf("%s:\t %d", title[i], current_id[i]);
-        if (i == 2) printf(", %s", current_id[i]);
+        if (i == 2) printf("\t%s:\t %s", title[i], current_id[i]);
+        else printf("\t%s:\t %d", title[i], current_id[i]);
         printf("\n");
     }
+    printf("token: %d, %p\n", token, token);
+    printf("token_val: %d\n", token_val);
+
 }
 
 
 /**
  * 用户词法分析，获取下一个标记
+ * 变量存在current_id与symbols中
+ * 数字值存放在token_val中
+ * token对应词法分析解析的标记流
  */
 void next()
 {
@@ -318,16 +332,8 @@ void expression(int level)
 
 }
 
-/**
- * 语法分析入口
- */
-void program()
-{
-    next();
-    while (token > 0) {
-        global_declaration();
-    }
-}
+int basetype;
+int expr_type;
 
 void match(int tk) {
     if (token == tk) {
@@ -338,6 +344,9 @@ void match(int tk) {
     }
 }
 
+/**
+ * 定义枚举
+ */
 void enum_declaration()
 {
     int i;
@@ -368,7 +377,82 @@ void enum_declaration()
     }
 }
 
-int index_of_bp;
+int index_of_bp; // bp的偏移
+
+void statement()
+{
+    int *a, *b;
+
+    if (token == If) {
+        match(If);
+        match('(');
+        expression(Assign);
+        match(')');
+
+        *++text = JZ;
+        b = ++text;
+
+        statement();
+        if (token == Else) {
+            match(Else);
+
+            *b = (int)(text + 3);
+            *++text = JMP;
+            b = ++text;
+
+            statement();
+        }
+
+        *b = (int)(text + 1);
+    }
+    else if (token == While) {
+        match(While);
+
+        a = text + 1;
+
+        match('(');
+        expression(Assign);
+        match(')');
+
+        *++text = JZ;
+        b = ++text;
+
+        statement();
+
+        *++text = JMP;
+        *++text = (int)a;
+        *b = (int)(text + 1);
+    }
+    else if (token == Return) {
+        match(Return);
+
+        if (token != ';') {
+            expression(Assign);
+        }
+        match(';');
+
+        *++text = LEV;
+    }
+    else if (token == '{') {
+        // { <statement> ... }
+        match('{');
+
+        while (token != '}') {
+            statement();
+        }
+
+        match('}');
+    }
+    else if (token == ';') {
+        // empty statement
+        match(';');
+    }
+    else {
+        // a = b; or function_call();
+        expression(Assign);
+        match(';');
+    }
+}
 
 void function_parameter()
 {
@@ -405,11 +489,12 @@ void function_parameter()
         current_id[BType] = current_id[Type];
         current_id[Type] = type;
         current_id[BValue] = current_id[Value];
-        current_id[Value] = params;
+        current_id[Value] = params++;
 
         if (token == ',') {
             match(',');
         }
+        debug();
     }
     index_of_bp = params + 1;
 }
@@ -485,9 +570,6 @@ void function_declaration()
     }
 }
 
-int basetype;
-int expr_type;
-
 void global_declaration()
 {
     int type;
@@ -550,6 +632,18 @@ void global_declaration()
 }
 
 /**
+ * 语法分析入口
+ */
+void program()
+{
+    next();
+    while (token > 0) {
+        global_declaration();
+        debug();
+    }
+}
+
+/**
  * 虚拟机入口，用于解释目标代码
  * @return [description]
  */
@@ -558,7 +652,6 @@ int eval()
     int op, * tmp;
     while (1) {
         op = *pc++;
-        debug();
         if (op == IMM)          { ax = *pc++;}                          // load immediate value to ax
         else if (op == LC)      { ax = *(char *)ax; }                    // load character to ax, address in ax
         else if (op == LI)      { ax = *(int *)ax; }                     // load integer to ax, address in ax
@@ -661,14 +754,16 @@ int main(int argc, char **argv)
     memset(symbols, 0, poolsize);
     // 分配内存结束
 
-    // 初始化寄存器
+    // 初始化寄存器 START
     // bp = sp = (int *)((int)stack + poolsize);
     bp = sp = stack + poolsize;
     ax = 0;
-    // 初始化寄存器结束
+    // 初始化寄存器 END
 
+    // 词法分析初始化语法符号与系统函数、入口函数 START
     src = "char else enum if int return sizeof while "
-          "open read close printf malloc memset memcmp exit void main";
+          "open read close printf malloc memset memcmp exit "
+          "void main";
     i = Char;
     while (i <= While) {
         next();
@@ -681,12 +776,13 @@ int main(int argc, char **argv)
         current_id[Class] = Sys;
         current_id[Type] = INT;
         current_id[Value] = i++;
-        debug();
     }
 
     next(); current_id[Token] = Char;
     next(); idmain = current_id;
-
+    // 词法分析 END
+    src = "char a;";
     program();
+    return;
     return eval();
 }
